@@ -1,0 +1,3 @@
+"""
+JIAPI - Database Initialization
+"""

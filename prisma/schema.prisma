@@ -1,0 +1,682 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// CORE LEGISLATION ENTITY
+// ============================================
+model Legislation {
+  id              String    @id @default(uuid())
+  era             Era       @default(POST_2023)
+  type            LegislationType
+  category        String    // e.g., "primary", "supporting", "nbr", "international", "admin"
+
+  // Titles
+  titleEn         String    @map("title_en")
+  titleBn         String?   @map("title_bn")
+  shortTitle      String?   @map("short_title") // e.g., "ITA 2023", "ITR 2024"
+
+  // Authority & Jurisdiction
+  authority       Authority @default(NBR)
+  jurisdiction    String    @default("Bangladesh")
+
+  // Dates
+  enactmentDate   DateTime? @map("enactment_date")
+  effectiveDate   DateTime  @map("effective_date")
+  repealDate      DateTime? @map("repeal_date")
+
+  // Versioning
+  versionNumber   Int       @default(1) @map("version_number")
+  status          LegislationStatus @default(ACTIVE)
+
+  // Relationships
+  parentId        String?   @map("parent_id")
+  parent          Legislation? @relation("LegislationVersions", fields: [parentId], references: [id])
+  versions        Legislation[] @relation("LegislationVersions")
+
+  // Content
+  contentBlocks   ContentBlock[]
+
+  // Amendments made BY this legislation (e.g., Finance Act 2024 amends ITA 2023)
+  amendmentsMade  Amendment[] @relation("AmendmentSource")
+
+  // Metadata
+  gazetteRef      String?   @map("gazette_ref")
+  documentUrl     String?   @map("document_url")
+  pdfUrl          String?   @map("pdf_url")
+
+  // Search & Discovery
+  tags            String[]  @default([])
+  keywords        String[]  @default([])
+  sector          String?   // e.g., "manufacturing", "it", "banking"
+
+  // Audit
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  createdBy       String?   @map("created_by")
+  updatedBy       String?   @map("updated_by")
+
+  // Full-text search
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+
+  @@index([type, status])
+  @@index([effectiveDate])
+  @@index([shortTitle])
+  @@index([searchVector], type: Gin)
+  @@map("legislations")
+}
+
+model ContentBlock {
+  id              String    @id @default(uuid())
+  legislationId   String    @map("legislation_id")
+  legislation     Legislation @relation(fields: [legislationId], references: [id], onDelete: Cascade)
+
+  // Hierarchy
+  blockType       BlockType @map("block_type")
+  numbering       String    // e.g., "30", "30(1)", "30(1)(a)", "First Schedule"
+  heading         String?
+
+  // Content
+  textOriginal    String    @map("text_original") // First enacted version
+  textCurrent     String    @map("text_current")  // Computed current version
+
+  // Temporal validity
+  effectiveFrom   DateTime  @map("effective_from")
+  effectiveTo     DateTime? @map("effective_to")
+
+  // Tree structure
+  parentId        String?   @map("parent_id")
+  parent          ContentBlock? @relation("BlockHierarchy", fields: [parentId], references: [id])
+  children        ContentBlock[] @relation("BlockHierarchy")
+
+  // Order within parent
+  displayOrder    Int       @default(0) @map("display_order")
+
+  // Amendments targeting this block
+  amendments      Amendment[]
+
+  // Case law references
+  caseReferences  CaseLawProvision[]
+
+  // Cross-references to other blocks
+  crossReferences ContentBlock[] @relation("CrossReferences")
+  crossReferencedBy ContentBlock[] @relation("CrossReferences")
+
+  // Search
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+
+  // Audit
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([legislationId])
+  @@index([numbering])
+  @@index([effectiveFrom, effectiveTo])
+  @@index([searchVector], type: Gin)
+  @@map("content_blocks")
+}
+
+// ============================================
+// AMENDMENT ENGINE - THE HEART OF THE SYSTEM
+// ============================================
+model Amendment {
+  id              String    @id @default(uuid())
+
+  // The legislation that MADE this amendment (e.g., Finance Act 2024)
+  sourceLegislationId String @map("source_legislation_id")
+  sourceLegislation   Legislation @relation("AmendmentSource", fields: [sourceLegislationId], references: [id])
+
+  // The block being amended
+  targetBlockId   String    @map("target_block_id")
+  targetBlock     ContentBlock @relation(fields: [targetBlockId], references: [id])
+
+  // Change details
+  changeType      ChangeType @map("change_type")
+  oldText         String?   @map("old_text")
+  newText         String?   @map("new_text")
+  oldNumbering    String?   @map("old_numbering")
+  newNumbering    String?   @map("new_numbering")
+
+  // Effective dates
+  effectiveDate   DateTime  @map("effective_date")
+  notificationDate DateTime @map("notification_date")
+  gazetteDate     DateTime? @map("gazette_date")
+
+  // Status
+  status          AmendmentStatus @default(PENDING)
+  appliedAt       DateTime? @map("applied_at")
+  appliedBy       String?   @map("applied_by")
+
+  // Verification
+  verifiedBy      String?   @map("verified_by")
+  verifiedAt      DateTime? @map("verified_at")
+
+  // Rollback support
+  rollbackOfId    String?   @map("rollback_of_id")
+
+  // Audit
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@index([sourceLegislationId])
+  @@index([targetBlockId])
+  @@index([effectiveDate])
+  @@index([status])
+  @@map("amendments")
+}
+
+// ============================================
+// CASE LAW
+// ============================================
+model CaseLaw {
+  id              String    @id @default(uuid())
+
+  // Identification
+  caseNumber      String    @map("case_number")
+  year            Int
+  court           CourtLevel
+  bench           String?   // e.g., "Division Bench", "Full Bench"
+
+  // Parties
+  petitioner      String
+  respondent      String
+
+  // Dates
+  filingDate      DateTime? @map("filing_date")
+  judgmentDate    DateTime  @map("judgment_date")
+
+  // Content
+  headnotes       String    // Summary
+  fullText        String?   @map("full_text")
+  pdfUrl          String?   @map("pdf_url")
+
+  // Status & Precedent value
+  status          CaseStatus @default(GOOD_LAW)
+  precedentValue  Int       @default(1) @map("precedent_value") // 1-5 scale
+
+  // Overruling
+  overruledById   String?   @map("overruled_by_id")
+  overruledBy     CaseLaw?  @relation("Overruling", fields: [overruledById], references: [id])
+  overruledCases  CaseLaw[] @relation("Overruling")
+
+  // Era reference
+  eraReferenced   Era       @map("era_referenced")
+
+  // Linked provisions
+  provisions      CaseLawProvision[]
+
+  // Citations
+  citations       String[]  @default([])
+  parallelCitations String[] @default([]) @map("parallel_citations")
+
+  // Judges
+  judges          String[]  @default([])
+
+  // Lawyer references
+  lawyersFor      String[]  @default([]) @map("lawyers_for")
+  lawyersAgainst  String[]  @default([]) @map("lawyers_against")
+
+  // Tax-specific
+  assessmentYear  String?   @map("assessment_year")
+  taxAmount       Decimal?  @map("tax_amount") @db.Decimal(15, 2)
+
+  // Search
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+
+  // Audit
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([caseNumber, year, court])
+  @@index([court, year])
+  @@index([judgmentDate])
+  @@index([status])
+  @@index([searchVector], type: Gin)
+  @@map("case_laws")
+}
+
+model CaseLawProvision {
+  id              String    @id @default(uuid())
+  caseLawId       String    @map("case_law_id")
+  caseLaw         CaseLaw   @relation(fields: [caseLawId], references: [id], onDelete: Cascade)
+
+  contentBlockId  String    @map("content_block_id")
+  contentBlock    ContentBlock @relation(fields: [contentBlockId], references: [id])
+
+  // How the provision was treated
+  treatment       ProvisionTreatment @default(DISCUSSED)
+
+  // Context
+  paragraphRef    String?   @map("paragraph_ref") // e.g., "para 45"
+  quote           String?   // Direct quote from judgment
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@unique([caseLawId, contentBlockId])
+  @@map("case_law_provisions")
+}
+
+// ============================================
+// DTAA (Double Taxation Avoidance Agreements)
+// ============================================
+model Dtaa {
+  id              String    @id @default(uuid())
+
+  country         String    // e.g., "United Kingdom", "Singapore"
+  countryCode     String    @map("country_code") // ISO code
+  treatyName      String    @map("treaty_name")
+
+  // Dates
+  signedDate      DateTime? @map("signed_date")
+  effectiveDate   DateTime  @map("effective_date")
+  protocolDate    DateTime? @map("protocol_date") // If amended by protocol
+
+  // Status
+  status          TreatyStatus @default(ACTIVE)
+
+  // Articles
+  articles        DtaaArticle[]
+
+  // Metadata
+  limitationOfBenefits Boolean @default(false) @map("limitation_of_benefits")
+  tiea            Boolean   @default(false) // Tax Information Exchange Agreement
+
+  // Rates summary (for quick API response)
+  dividendRate    Decimal?  @map("dividend_rate") @db.Decimal(5, 2)
+  interestRate    Decimal?  @map("interest_rate") @db.Decimal(5, 2)
+  royaltyRate     Decimal?  @map("royalty_rate") @db.Decimal(5, 2)
+
+  // Document
+  pdfUrl          String?   @map("pdf_url")
+
+  // Search
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([countryCode])
+  @@map("dtaas")
+}
+
+model DtaaArticle {
+  id              String    @id @default(uuid())
+  dtaaId          String    @map("dtaa_id")
+  dtaa            Dtaa      @relation(fields: [dtaaId], references: [id], onDelete: Cascade)
+
+  articleNumber   String    @map("article_number")
+  title           String
+  content         String
+
+  // Specific types for quick filtering
+  articleType     DtaaArticleType @map("article_type")
+
+  displayOrder    Int       @default(0) @map("display_order")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("dtaa_articles")
+}
+
+// ============================================
+// SRO / GO / CIRCULAR SPECIFIC MODELS
+// ============================================
+model NbrInstrument {
+  id              String    @id @default(uuid())
+
+  instrumentType  NbrInstrumentType @map("instrument_type")
+  number          String    // SRO number, GO number, Circular number
+  year            Int
+
+  titleEn         String    @map("title_en")
+  titleBn         String?   @map("title_bn")
+
+  // Authority
+  issuingWing     String    @map("issuing_wing") // "Income Tax", "VAT", "Customs"
+  issuedBy        String    @map("issued_by")
+
+  // Dates
+  issueDate       DateTime  @map("issue_date")
+  effectiveDate   DateTime  @map("effective_date")
+  expiryDate      DateTime? @map("expiry_date")
+
+  // Content
+  summary         String?
+  fullText        String    @map("full_text")
+  pdfUrl          String?   @map("pdf_url")
+
+  // Applicability
+  applicableTo    String[]  @default([]) @map("applicable_to") // sectors
+  taxYears        String[]  @default([]) @map("tax_years")
+
+  // Status
+  status          InstrumentStatus @default(ACTIVE)
+  supersededById  String?   @map("superseded_by_id")
+
+  // Search
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+
+  // Audit
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([instrumentType, number, year])
+  @@index([instrumentType, status])
+  @@index([issueDate])
+  @@index([searchVector], type: Gin)
+  @@map("nbr_instruments")
+}
+
+// ============================================
+// USERS & API KEYS (for commercial tiers)
+// ============================================
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  name            String?
+  organization    String?
+  role            UserRole  @default(USER)
+
+  // Subscription
+  tier            SubscriptionTier @default(FREE)
+  tierExpiresAt   DateTime? @map("tier_expires_at")
+
+  // Usage tracking
+  monthlyRequests Int       @default(0) @map("monthly_requests")
+  monthlyResetAt  DateTime  @default(now()) @map("monthly_reset_at")
+
+  // API Keys
+  apiKeys         ApiKey[]
+
+  // Webhooks
+  webhooks        WebhookConfig[]
+
+  // Auth
+  passwordHash    String    @map("password_hash")
+  emailVerified   Boolean   @default(false) @map("email_verified")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model ApiKey {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  keyHash         String    @map("key_hash") // Store hash, not plaintext
+  keyPrefix       String    @map("key_prefix") // First 8 chars for display
+  name            String?   // e.g., "Production", "Development"
+
+  // Limits
+  rateLimitPerMinute Int  @default(60) @map("rate_limit_per_minute")
+  dailyQuota      Int       @default(1000) @map("daily_quota")
+
+  // Scope
+  allowedEndpoints String[] @default([]) @map("allowed_endpoints") // ["acts", "rules", "sros"]
+
+  // Status
+  isActive        Boolean   @default(true) @map("is_active")
+  lastUsedAt      DateTime? @map("last_used_at")
+  expiresAt       DateTime? @map("expires_at")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("api_keys")
+}
+
+model WebhookConfig {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  url             String
+  secret          String    // For HMAC signature
+
+  // Events to subscribe to
+  events          WebhookEvent[] @default([AMENDMENT_APPLIED])
+
+  // Filters
+  watchedSections String[]  @default([]) @map("watched_sections")
+  watchedTypes    LegislationType[] @default([]) @map("watched_types")
+
+  // Status
+  isActive        Boolean   @default(true) @map("is_active")
+  lastDeliveredAt DateTime? @map("last_delivered_at")
+  lastError       String?   @map("last_error")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("webhook_configs")
+}
+
+// ============================================
+// AUDIT LOG
+// ============================================
+model AuditLog {
+  id              String    @id @default(uuid())
+
+  action          AuditAction
+  entityType      String    @map("entity_type") // "legislation", "amendment", "case_law"
+  entityId        String    @map("entity_id")
+
+  // Who
+  userId          String?   @map("user_id")
+  apiKeyId        String?   @map("api_key_id")
+  ipAddress       String?   @map("ip_address")
+
+  // What changed
+  oldValue        Json?     @map("old_value")
+  newValue        Json?     @map("new_value")
+
+  // Context
+  requestPath     String?   @map("request_path")
+  requestMethod   String?   @map("request_method")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+enum Era {
+  PRE_2023
+  POST_2023
+  BOTH
+}
+
+enum LegislationType {
+  ACT
+  RULES
+  FINANCE_ACT
+  VAT_ACT
+  CUSTOMS_ACT
+  SRO
+  GENERAL_ORDER
+  CIRCULAR
+  DTAA
+  BEPS_REFERENCE
+  TP_REGULATION
+  COMPLIANCE_MANUAL
+}
+
+enum Authority {
+  PARLIAMENT
+  NBR
+  MINISTRY_FINANCE
+  CABINET
+  OECD
+  OTHER
+}
+
+enum LegislationStatus {
+  ACTIVE
+  AMENDED
+  REPEALED
+  SUPERSEDED
+  DRAFT
+  PROPOSED
+}
+
+enum BlockType {
+  CHAPTER
+  PART
+  SECTION
+  SUBSECTION
+  CLAUSE
+  SUBCLAUSE
+  PARAGRAPH
+  SCHEDULE
+  TABLE
+  FORMULA
+  DEFINITION
+  PREAMBLE
+}
+
+enum ChangeType {
+  INSERT
+  DELETE
+  SUBSTITUTE
+  RENUMBER
+  REPEAL
+  INSERT_AFTER
+  INSERT_BEFORE
+}
+
+enum AmendmentStatus {
+  PENDING
+  VERIFIED
+  APPLIED
+  ROLLED_BACK
+  REJECTED
+}
+
+enum CourtLevel {
+  APPELLATE_DIVISION
+  HIGH_COURT_DIVISION
+  TAX_APPELLATE_TRIBUNAL
+  DISTRICT_COURT
+  SPECIAL_JUDGE
+}
+
+enum CaseStatus {
+  GOOD_LAW
+  OVERRULED
+  DISTINGUISHED
+  FOLLOWED
+  DOUBTED
+  PENDING_APPEAL
+}
+
+enum ProvisionTreatment {
+  INTERPRETED
+  APPLIED
+  DISTINGUISHED
+  DISCUSSED
+  OVERRULED
+  FOLLOWED
+}
+
+enum TreatyStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+  NEGOTIATING
+  SIGNED_NOT_EFFECTIVE
+}
+
+enum DtaaArticleType {
+  RESIDENCE
+  PERMANENT_ESTABLISHMENT
+  INCOME_FROM_IMMovable_PROPERTY
+  BUSINESS_PROFITS
+  SHIPPING_AIR_TRANSPORT
+  DIVIDENDS
+  INTEREST
+  ROYALTIES
+  CAPITAL_GAINS
+  EMPLOYMENT_INCOME
+  DIRECTORS_FEES
+  ARTISTES_SPORTSMEN
+  PENSIONS
+  GOVERNMENT_SERVICE
+  STUDENTS
+  OTHER_INCOME
+  ELIMINATION_DOUBLE_TAXATION
+  NON_DISCRIMINATION
+  MUTUAL_AGREEMENT_PROCEDURE
+  EXCHANGE_OF_INFORMATION
+  ASSISTANCE_COLLECTION
+  MEMBERS_OF_DIPLOMATIC_MISSIONS
+  TERRITORIAL_SCOPE
+  ENTRY_INTO_FORCE
+  TERMINATION
+  LIMITATIONS_BENEFITS
+  OTHER
+}
+
+enum NbrInstrumentType {
+  SRO
+  GENERAL_ORDER
+  CIRCULAR
+  ORDER
+  NOTIFICATION
+  OFFICE_ORDER
+}
+
+enum InstrumentStatus {
+  ACTIVE
+  EXPIRED
+  SUPERSEDED
+  WITHDRAWN
+  PROPOSED
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  LEGAL_EDITOR
+  VERIFIER
+  SUPER_ADMIN
+}
+
+enum SubscriptionTier {
+  FREE
+  BASIC
+  PROFESSIONAL
+  ENTERPRISE
+  LAW_FIRM
+}
+
+enum WebhookEvent {
+  AMENDMENT_APPLIED
+  AMENDMENT_PENDING
+  LEGISLATION_REPEALED
+  CASE_LAW_ADDED
+  SRO_ISSUED
+  CIRCULAR_ISSUED
+  SECTION_CHANGED
+  RATE_CHANGE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPLY_AMENDMENT
+  ROLLBACK_AMENDMENT
+  VERIFY
+  PUBLISH
+  API_ACCESS
+}
