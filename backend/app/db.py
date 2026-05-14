@@ -1,20 +1,20 @@
 """
 JIAPI - Database Connection
-Async PostgreSQL with SQLAlchemy
+Async PostgreSQL with SQLAlchemy (Serverless Optimized)
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from app.core.config import settings
 
-# Async engine for FastAPI
+# Async engine for FastAPI (SERVERLESS OPTIMIZED)
 async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
-    pool_size=20,
-    max_overflow=30,
+    pool_size=2,            # Very small for serverless
+    max_overflow=0,         # No overflow
     pool_pre_ping=True,
-    pool_recycle=3600,
+    pool_recycle=300,       # Short recycle for serverless
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -28,8 +28,8 @@ AsyncSessionLocal = async_sessionmaker(
 sync_engine = create_engine(
     settings.DATABASE_URL_SYNC,
     echo=settings.DEBUG,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=2,
+    max_overflow=0,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
@@ -42,7 +42,6 @@ async def get_db() -> AsyncSession:
             yield session
         finally:
             await session.close()
-
 
 def get_sync_db():
     """Sync session for background tasks"""
